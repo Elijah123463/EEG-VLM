@@ -1,6 +1,7 @@
 ------
 
 **Experiment Overview**
+
  Considering the performance and computational cost of vision-language models (VLMs), we conducted our experiments based on the LLaVA-1.5-13B model to validate the effectiveness of the proposed strategy.
 
 ------
