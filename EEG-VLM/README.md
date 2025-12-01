@@ -1,444 +1,67 @@
-<h2 align="center">Interpretable EEG Sleep Stage Prediction via Hierarchical Vision-Language Models with Chain-of-Thought Reasoning</h2>
+# Experiment Overview
 
+ Considering the performance and computational cost of vision-language models (VLMs), we conducted our experiments based on the LLaVA-1.5-13B model to validate the effectiveness of the proposed strategy.
 
+# Model Usage Instructions
+## Step 1:
 
-## Project Structure
-- Run `main.py` to train any model. Modify paths to the dataset and model checkpoints as necessary.
-- `metrics` contains evaluation scripts for various models. These scripts utilize `common_metrics.py` to compute metrics such as mAP (Mean Average Precision), mHR (Mean Hit Rate), and mRR (Mean Reciprocal Rank). Modify paths to the dataset and model checkpoints within these scripts as needed.
-- `dataloader` contains the dataloader implementations for each model in the respective formats.
-- `graph_transformer` is adapted from the well maintained [GitHub repository](https://github.com/lucidrains/graph-transformer-pytorch) of the graph transformer architecture with added functionalities to support the project requirements.
-- `model` contains definitions and architectures for the various models used in the project.
-- `notebooks` includes Jupyter notebooks used for analysis, visualizations, and initial experiments. These were later converted to Python scripts for streamlined execution.
-- `others` contains scripts for data processing and transferring data to HPC cluster, specific to our setup.
-- `output` is where results are stored in a tabular format, detailing top-3, top-5, and top-10 retrieved images.
-- `Res2Net` contains the multi-scale ResNet50 model definition borrowed from [this repository](https://github.com/Res2Net/Res2Net-PretrainedModels).
-- `scripts` includes the command scripts to train any model including hyperparameter tuning.
+Design your own efficient **specialized vision module**. This module is highly pluggable and generalizable. In addition to the customized ResNet-18 and ConvNeXt-Base described in the paper, you can flexibly substitute more powerful vision encoders—such as those based on Transformer or Mamba architectures—to better capture both local and global information in EEG images, further enhancing the visual perception and processing capabilities of the VLM.
 
-## Baselines
+During training and testing, use the specialized vision module to extract **intermediate-layer features** (high-level representations) of shape `[N, 1, 1024]`. Save these features in `.npy` format in the `sleep_data` directory, saved as `train_high_level_features.npy` for training and `eval_high_level_features.npy` for testing. These files will be used for subsequent model fine-tuning and evaluation.
 
-### 1. Global CNN
-The Global CNN baseline utilizes ResNet18 to extract latent representations from chest radiographs. Only the classification head is finetuned, while the rest of the network's weights are frozen.
+## Step 2:
 
-#### Training
-Use the following script to train the ResNet18 model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0005 \
-    --grad_accum 4 \
-    --task resnet50 \
-    --run resnet50_fc \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
+Prepare your fine-tuning and evaluation data. Since the high-level representations (also known as feature maps) extracted by the specialized vision module are treated as images in the downstream process, you should modify the input images in the corresponding `json` or `jsonl` files to a list format: `[Image1, Image2]`. Here, `Image2` is identical to `Image1` and serves as a placeholder. During fine-tuning and evaluation, this placeholder will be automatically replaced by the corresponding `high_level_features` generated in Step 1.
+
+This approach enables seamless integration with the existing VLM data processing pipeline, requiring only moderate modifications to the core code to achieve flexible feature injection and unified data handling.
+
+## Step 3: Fine-tuning with LoRA
+
+```bash
+deepspeed llava/train/train_mem.py \
+  --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
+  --deepspeed ./scripts/zero3.json \
+  --model_name_or_path your_checkpoints_path/LLaVA-v1.5-13b \
+  --version v1 \
+  --data_path sleep_data/eeg_ft.json \
+  --image_folder sleep_data/eeg_images_ft \
+  --vision_tower openai/clip-vit-large-patch14-336 \
+  --mm_projector_type mlp2x_gelu \
+  --mm_vision_select_layer -2 \
+  --mm_use_im_start_end False \
+  --mm_use_im_patch_token False \
+  --image_aspect_ratio pad \
+  --group_by_modality_length True \
+  --bf16 True \
+  --output_dir ./checkpoints/your_checkpoints_save_path \
+  --num_train_epochs 2 \
+  --per_device_train_batch_size 16 \
+  --per_device_eval_batch_size 4 \
+  --gradient_accumulation_steps 1 \
+  --evaluation_strategy "no" \
+  --save_strategy "steps" \
+  --save_steps 50000 \
+  --save_total_limit 1 \
+  --learning_rate 3e-4 \
+  --weight_decay 0. \
+  --warmup_ratio 0.03 \
+  --lr_scheduler_type "cosine" \
+  --logging_steps 1 \
+  --tf32 True \
+  --model_max_length 4096 \
+  --gradient_checkpointing True \
+  --dataloader_num_workers 1 \
+  --lazy_preprocess True \
+  --report_to wandb
 ```
 
-#### Evaluation
-Use the following script to evaluate the ResNet50 model:
-```python
-python metrics/temp_metrics_resnet50.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0005 \
-    --task resnet50 \
-    --run resnet50_fc \
-    --num_workers 32
-```
-## Data
-The dataset is self-collected and would not be public due to privacy and ethics. We believe that the models can also be helpful.
+## Step 4: Evaluation
 
-### 2. ATH
-Attention-based Triplet Hashing (ATH) is a state-of-the-art chest radiograph retrieval method based on attention mechanism and triplet hashing. More details can be found in the [Github repository](https://github.com/fjssharpsword/ATH) and the [paper](https://arxiv.org/pdf/2101.12346).
-
-#### Training
-Use the following script to train the ATH model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 24 \
-    --lr 0.001 \
-    --grad_accum 4 \
-    --dropout 0.0 \
-    --hash_bits 32 \
-    --task ath \
-    --run ath \
-    --gpu_ids 0 \
-    --num_workers 36 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the ATH model:
-```python
-python metrics/temp_metrics_ath.py \
-    --num_classes 9 \
-    --batch_size 24 \
-    --lr 0.001 \
-    --grad_accum 4 \
-    --dropout 0.0 \
-    --hash_bits 32 \
-    --task ath \
-    --run ath \
-    --num_workers 36
-```
-
-## 3. AnaXNet
-AnaXNet is an anatomy-aware multi-label classification model for chest X-rays. For more details, refer to the [paper](https://miccai2021.org/openaccess/paperlinks/2021/09/01/053-Paper1467.html).
-
-#### Training
-Use the following script to train the AnaXNet model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 32 \
-    --lr 0.0001 \
-    --grad_accum 4 \
-    --task anaxnet \
-    --run anaxnet_final \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the AnaXNet model:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --task anaxnet \
-    --run anaxnet_final \
-    --num_workers 32
-```
-
-## CheXtriev
-CheXtriev is a novel graph-based, anatomy-aware framework designed for chest radiograph retrieval. It consists of several variants (V0 to V6), each incorporating various enhancements and modifications.
-
-### V0
-This variant extracts ResNet50 features from the predefined 18 anatomical regions, and uses mean pooling to obtain the latent representation of the chest radiographs.
-<!-- xfactor mean pool nodes, global image level classification -->
-#### Global Image Level Classification Training
-Use the following script to train the V0 model for global image level classification:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 1 \
-    --graph_importance 1.0 \
-    --pool mean \
-    --minimalistic \
-    --task xfactor \
-    --run mean_pool_global_image_classification_bz \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-#### Global Image Level Classification Evaluation
-Use the following script to evaluate the V0 model for global image level classification:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 1 \
-    --graph_importance 1.0 \
-    --pool mean \
-    --minimalistic \
-    --task xfactor \
-    --run mean_pool_global_image_classification_bz \
-    --num_workers 32
-```
-
-<!-- xfactor mean pool nodes, node level classification -->
-#### Local Anatomy Level Classification Training
-Use the following script to train the V0 model for local anatomy level classification:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 1 \
-    --graph_importance 0.0 \
-    --pool mean \
-    --minimalistic \
-    --task xfactor \
-    --run mean_pool_node_classification_bz \
-    --gpu_ids 0 1 \
-    --num_workers 10 \
-    --train \
-    --log
-```
-
-#### Local Anatomy Level Classification Evaluation
-Use the following script to train the V0 model for local anatomy level classification:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 1 \
-    --graph_importance 0.0 \
-    --pool mean \
-    --minimalistic \
-    --task xfactor \
-    --run mean_pool_node_classification_bz \
-    --num_workers 20
-```
-
-### V1
-In V1, anatomical features processed through ResNet50 are further contextualized using a graph transformer, with edge connections (binary) based on label co-occurence. This model is supervised globally at the image level.
-
-
-#### Training
-Use the following script to train the V1 model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --task graph_transformer \
-    --run best_config_adj_mat \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the V1 model:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --task graph_transformer \
-    --run best_config_adj_mat \
-    --num_workers 32
-```
-
-### V2
-In V2, anatomical features processed through ResNet50 are further contextualized using a graph transformer, with fully connected uniform edge connections to model relationships among the anatomical structures. This model is supervised globally at the image level.
-
-#### Training
-Use the following script to train the V2 model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --task graph_transformer \
-    --run best_config_abs_pos \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the V2 model:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --task graph_transformer \
-    --run best_config_abs_pos \
-    --num_workers 32
-```
-
-### V3
-V3 builds on V2 by introducing learnable positional embeddings, enhancing the model's ability to capture spatial relationships between anatomical features.
-
-#### Training
-Use the following script to train the V3 model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --abs_pos \
-    --task graph_transformer \
-    --run best_config_abs_pos \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the V3 model:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --abs_pos \
-    --task graph_transformer \
-    --run best_config_abs_pos \
-    --num_workers 32
-```
-
-### V4
-V4 modifies V3 by making the fully connected edges unique and entirely learnable and supervised globally at the image level. We use local multi-level features with gated residuals in V4 only.
-
-#### Training
-Use the following script to train the V4 model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 2 \
-    --graph_importance 0.0 \
-    --fully_connected \
-    --abs_pos \
-    --accept_edges \
-    --residual_type 2 \
-    --task graph_transformer \
-    --run best_config_with_edges_local_anatomy \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the V4 model:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --num_layers 2 \
-    --graph_importance 0.0 \
-    --fully_connected \
-    --abs_pos \
-    --accept_edges \
-    --residual_type 2 \
-    --task graph_transformer \
-    --run best_config_with_edges_local_anatomy \
-    --num_workers 32
-```
-
-### V5
-V5 alters V4 by omitting the learnable positional embeddings, supervising globally at the image level and uses global multi-level features with gated residuals.
-
-#### Training
-Use the following script to train the V5 model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --accept_edges \
-    --residual_type 2 \
-    --task graph_transformer \
-    --run best_config_with_edges_without_pos_emb \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the V5 model:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --accept_edges \
-    --residual_type 2 \
-    --task graph_transformer \
-    --run best_config_with_edges_without_pos_emb \
-    --num_workers 32
-```
-
-### V6
-V6 is the best configuration, where detected anatomies are processed through ResNet50 and then passed through two layers of Graph Transformers with learnable continuous edges and positional embeddings. This model is supervised globally at the image level.
-
-#### Training
-Use the following script to train the V6 model:
-```python
-python main.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --grad_accum 8 \
-    --dropout 0.0 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --abs_pos \
-    --accept_edges \
-    --task graph_transformer \
-    --run best_config_abs_pos_with_edges \
-    --gpu_ids 0 1 \
-    --num_workers 20 \
-    --train \
-    --log
-```
-
-#### Evaluation
-Use the following script to evaluate the V6 model:
-```python
-python metrics/temp_metrics_anaxnet.py \
-    --num_classes 9 \
-    --batch_size 16 \
-    --lr 0.0001 \
-    --num_layers 2 \
-    --graph_importance 1.0 \
-    --fully_connected \
-    --abs_pos \
-    --accept_edges \
-    --task graph_transformer \
-    --run best_config_abs_pos_with_edges \
-    --num_workers 32
+```bash
+python llava/eval/model_vqa.py \
+  --model-path checkpoints/your_checkpoints_save_path/ \
+  --model-base your_checkpoints_path/LLaVA-v1.5-13b/ \
+  --question-file sleep_data/eeg_eval.jsonl \
+  --image-folder sleep_data/eeg_images_eval \
+  --answers-file sleep_data/answers/eeg_answers.jsonl 
 ```
