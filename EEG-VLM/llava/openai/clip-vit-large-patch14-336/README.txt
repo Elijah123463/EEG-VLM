@@ -1,0 +1,1 @@
+This directory contains the weight files for clip-vit-large-patch14-336.
